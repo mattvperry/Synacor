@@ -5,6 +5,8 @@
 
     public class VirtualMachine
     {
+        private const ushort ADDR_SPACE = 32768;
+
         private bool halted;
 
         private ushort instructionPointer;
@@ -23,33 +25,33 @@
         {
             this.halted = true;
             this.instructionPointer = 0;
-            this.memory = new ushort[32768];
+            this.memory = new ushort[ADDR_SPACE];
             this.registers = new ushort[8];
             this.stack = new Stack<ushort>();
             this.term = new Terminal();
             this.instructionSet = new Dictionary<OpCodes, Action>
             {
                 [OpCodes.Halt]  = () => this.halted = true,
-                [OpCodes.Set]   = this.ExecuteOp(this.Set),
-                [OpCodes.Push]  = this.ExecuteOp(this.Push),
-                [OpCodes.Pop]   = this.ExecuteOp(this.Pop),
-                [OpCodes.Eq]    = this.ExecuteOp(this.Eq),
-                [OpCodes.Gt]    = this.ExecuteOp(this.Gt),
-                [OpCodes.Jmp]   = this.ExecuteOp(this.Jmp),
-                [OpCodes.Jt]    = this.ExecuteOp(this.Jt),
-                [OpCodes.Jf]    = this.ExecuteOp(this.Jf),
-                [OpCodes.Add]   = this.ExecuteOp(this.Add),
-                [OpCodes.Mult]  = this.ExecuteOp(this.Mult),
-                [OpCodes.Mod]   = this.ExecuteOp(this.Mod),
-                [OpCodes.And]   = this.ExecuteOp(this.And),
-                [OpCodes.Or]    = this.ExecuteOp(this.Or),
-                [OpCodes.Not]   = this.ExecuteOp(this.Not),
-                [OpCodes.Rmem]  = this.ExecuteOp(this.Rmem),
-                [OpCodes.Wmem]  = this.ExecuteOp(this.Wmem),
-                [OpCodes.Call]  = this.ExecuteOp(this.Call),
+                [OpCodes.Set]   = () => this.SetOp((b) => b),
+                [OpCodes.Push]  = () => this.GetOp(this.stack.Push),
+                [OpCodes.Pop]   = () => this.SetOp(this.stack.Pop),
+                [OpCodes.Eq]    = () => this.SetOp((b, c) => b == c ? 1 : 0),
+                [OpCodes.Gt]    = () => this.SetOp((b, c) => b > c ? 1 : 0),
+                [OpCodes.Jmp]   = () => this.GetOp((a) => this.instructionPointer = a),
+                [OpCodes.Jt]    = () => this.GetOp(this.ConditionalJump((a) => a > 0)),
+                [OpCodes.Jf]    = () => this.GetOp(this.ConditionalJump((a) => a == 0)),
+                [OpCodes.Add]   = () => this.SetOp((b, c) => (b + c) % ADDR_SPACE),
+                [OpCodes.Mult]  = () => this.SetOp((b, c) => (b * c) % ADDR_SPACE),
+                [OpCodes.Mod]   = () => this.SetOp((b, c) => (b % c) % ADDR_SPACE),
+                [OpCodes.And]   = () => this.SetOp((b, c) => b & c),
+                [OpCodes.Or]    = () => this.SetOp((b, c) => b | c),
+                [OpCodes.Not]   = () => this.SetOp((b) => ~b & 0x7FFF),
+                [OpCodes.Rmem]  = () => this.SetOp((b) => this.memory[b]),
+                [OpCodes.Wmem]  = () => this.GetOp((a, b) => this.memory[a] = b),
+                [OpCodes.Call]  = () => this.GetOp(this.Call),
                 [OpCodes.Ret]   = () => this.instructionPointer = this.stack.Pop(),
-                [OpCodes.Out]   = this.ExecuteOp(this.Out),
-                [OpCodes.In]    = this.ExecuteOp(this.In),
+                [OpCodes.Out]   = () => this.GetOp(this.term.WriteAscii),
+                [OpCodes.In]    = () => this.SetOp(this.term.ReadAscii),
                 [OpCodes.Noop]  = () => { },
             };
         }
@@ -59,80 +61,74 @@
             this.ReadBinaryIntoMemory(fileName);
             this.Execute();
         }
-        
-        private Action ExecuteOp(Action<ushort> action) => 
-            () => action(this.ReadAndAdvance());
 
-        private Action ExecuteOp(Action<ushort, ushort> action) => 
-            () => action(this.ReadAndAdvance(), this.ReadAndAdvance());
-
-        private Action ExecuteOp(Action<ushort, ushort, ushort> action) => 
-            () => action(this.ReadAndAdvance(), this.ReadAndAdvance(), this.ReadAndAdvance());
-
-        private void Set(ushort a, ushort b) => this.SetRegister(a, this.GetValue(b));
-
-        private void Push(ushort a) => this.stack.Push(this.GetValue(a));
-
-        private void Pop(ushort a) => this.SetRegister(a, stack.Pop());
-
-        private void Eq(ushort a, ushort b, ushort c) => this.SetRegister(a, this.GetValue(b) == this.GetValue(c) ? (ushort)1 : (ushort)0);
-
-        private void Gt(ushort a, ushort b, ushort c) => this.SetRegister(a, this.GetValue(b) > this.GetValue(c) ? (ushort)1 : (ushort)0);
-
-        private void Jmp(ushort a) => this.instructionPointer = this.GetValue(a);
-
-        private void Jt(ushort a, ushort b)
+        private Action<ushort, ushort> ConditionalJump(Func<ushort, bool> condition)
         {
-            if (this.GetValue(a) > 0)
+            return (a, b) =>
             {
-                this.instructionPointer = this.GetValue(b);
-            }
+                if (condition(a))
+                {
+                    this.instructionPointer = b;
+                }
+            };
         }
-
-        private void Jf(ushort a, ushort b)
-        {
-            if (this.GetValue(a) == 0)
-            {
-                this.instructionPointer = this.GetValue(b);
-            }
-        }
-
-        private void Add(ushort a, ushort b, ushort c) => this.SetRegister(a, (ushort)((this.GetValue(b) + this.GetValue(c)) % 32768));
-
-        private void Mult(ushort a, ushort b, ushort c) => this.SetRegister(a, (ushort)((this.GetValue(b) * this.GetValue(c)) % 32768));
-
-        private void Mod(ushort a, ushort b, ushort c) => this.SetRegister(a, (ushort)((this.GetValue(b) % this.GetValue(c)) % 32768));
-
-        private void And(ushort a, ushort b, ushort c) => this.SetRegister(a, (ushort)(this.GetValue(b) & this.GetValue(c)));
-
-        private void Or(ushort a, ushort b, ushort c) => this.SetRegister(a, (ushort)(this.GetValue(b) | this.GetValue(c)));
-
-        private void Not(ushort a, ushort b) => this.SetRegister(a, (ushort)(~this.GetValue(b) & 0x7FFF));
-
-        private void Rmem(ushort a, ushort b) => this.SetRegister(a, this.memory[this.GetValue(b)]);
-
-        private void Wmem(ushort a, ushort b) => this.memory[this.GetValue(a)] = this.GetValue(b);
 
         private void Call(ushort a)
         {
             this.stack.Push(this.instructionPointer);
-            this.instructionPointer = this.GetValue(a);
+            this.instructionPointer = a;
         }
 
-        private void Ret() => this.instructionPointer = this.stack.Pop();
+        private void GetOp(Action<ushort> action)
+        {
+            var a = this.GetValue(this.ReadAndAdvance());
+            action(a);
+        }
 
-        private void Out(ushort a) => this.term.WriteAscii(this.GetValue(a));
+        private void SetOp<T>(Func<T> action) where T : IConvertible
+        {
+            var a = this.ReadAndAdvance();
+            this.SetRegister(a, action().ToUInt16(null));
+        }
 
-        private void In(ushort a) => this.SetRegister(a, this.term.ReadAscii());
+        private void GetOp(Action<ushort, ushort> action)
+        {
+            var a = this.GetValue(this.ReadAndAdvance());
+            var b = this.GetValue(this.ReadAndAdvance());
+            action(a, b);
+        }
+
+        private void SetOp<T>(Func<ushort, T> action) where T : IConvertible
+        {
+            var a = this.ReadAndAdvance();
+            var b = this.GetValue(this.ReadAndAdvance());
+            this.SetRegister(a, action(b).ToUInt16(null));
+        }
+
+        private void GetOp(Action<ushort, ushort, ushort> action)
+        {
+            var a = this.GetValue(this.ReadAndAdvance());
+            var b = this.GetValue(this.ReadAndAdvance());
+            var c = this.GetValue(this.ReadAndAdvance());
+            action(a, b, c);
+        }
+
+        private void SetOp<T>(Func<ushort, ushort, T> action) where T : IConvertible
+        {
+            var a = this.ReadAndAdvance();
+            var b = this.GetValue(this.ReadAndAdvance());
+            var c = this.GetValue(this.ReadAndAdvance());
+            this.SetRegister(a, action(b, c).ToUInt16(null));
+        }
 
         private void SetRegister(ushort param, ushort value)
         {
-            this.registers[param - 32768] = value;
+            this.registers[param - ADDR_SPACE] = value;
         }
 
         private ushort GetValue(ushort param)
         {
-            return (ushort)(param < 32768 ? param : this.registers[param - 32768]);
+            return (ushort)(param < ADDR_SPACE ? param : this.registers[param - ADDR_SPACE]);
         }
 
         private void Execute()
